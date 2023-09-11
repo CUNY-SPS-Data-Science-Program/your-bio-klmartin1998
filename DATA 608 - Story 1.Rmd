@@ -1,0 +1,249 @@
+---
+title: "DATA 608 - Story 1"
+author: "Kory Martin"
+date: "2023-09-09"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    toc: yes
+---
+
+## Overview: 
+
+For this assignment we were given a file containing data on the present allocation of the Infrastructure Investment and Jobs Act funding broken out by State and Territory. The goal of this assignment was to develop a story using data visualizations to address the following questions:
+
+1. Is the allocation equitable based on the population of each of the States and Territories, or is bias apparent?
+2. Does the allocation favor the political interests of the Biden administration?
+
+In order to help in telling the story, I also included 
+[US Census data](https://www.census.gov/data/tables/time-series/demo/popest/2020s-state-total.html) showing the state populations in 2020, as well as [data](https://www.presidency.ucsb.edu/statistics/elections/2020) showing a breakdown of votes for Biden and Trump in the 2020 US Presidential election.
+
+Based on this data, my initial hypothesis is that evidence of bias in funding, would be reflected in one of several ways:
+
+- Differences in how the total funding was apportioned between Biden won states and Trump won states
+- Differences in the per capita funding levels between the two groups
+
+The expectation is that if the funding was inequitable, it would be in favor of Biden won states. 
+
+## Setup
+
+We began by installing the necessary packages and librarry for use in importing and cleaning the data and for visualizing the tables. 
+
+```{r setup}
+options(repos = list(CRAN="http://cran.rstudio.com/"))
+knitr::opts_chunk$set(echo = TRUE, error=TRUE)
+
+install.packages("tidyverse")
+install.packages("rvest")
+install.packages("kableExtra")
+
+library(tidyverse)
+library(rvest)
+library(kableExtra)
+```
+
+## Import Data
+
+Here we are importing the data from the various sources.
+
+```{r}
+
+funding_data <- readxl::read_excel('/Users/korymartin/Google Drive/My Drive/MS Program/Fall 2023/DATA 608/Stories/Story 1/IIJA FUNDING AS OF MARCH 2023(1).xlsx')
+
+
+state_pop <- readxl::read_excel('/Users/korymartin/Google Drive/My Drive/MS Program/Fall 2023/DATA 608/Stories/Story 1/NST-EST2022-POP.xlsx', range="A10:E62", col_names = FALSE)
+
+#Rename the columns for state population table
+
+state_pop <- state_pop %>% rename(
+  "state_territory" = "...1",
+  "estimate_base_2020" = "...2",
+  "estimate_2020" = "...3",
+  "estimate_2021" = "...4",
+  "estimate_2022" = "...5"
+)
+
+
+# 2020 Election Data
+url <- 'https://www.presidency.ucsb.edu/statistics/elections/2020'
+
+web_page <- read_html(url)
+table_node <- html_node(web_page, "table")
+
+results_table <- html_table(table_node)
+results_filtered <- results_table %>% slice(10:n()) %>% select(1:11)
+
+#Remove Electoral College Votes
+results_filtered <- results_filtered %>% select(-c(X4,X5,X7,X8,X10,X11)) 
+
+results_filtered <- results_filtered %>% rename(
+  "state_territory" = "X1",
+  "total_votes" = "X2",
+  "biden_votes" = "X3",
+  "trump_votes" = "X6",
+  "other_votes" = "X9"
+)
+
+#Remove unnecessary rows of data
+election_results <- results_filtered %>% slice(4:61)
+
+
+```
+
+
+
+## Create Combined Dataset
+
+Here we are joining the data from the respective datasets to create a single dataset. 
+
+```{r}
+## Update column names for funding data table
+colnames(funding_data) <- c("state_territory", "total_funding_billions")
+
+## Change case of state_territory data
+funding_data <- funding_data %>% mutate(
+  state_territory = str_to_title(state_territory)
+)
+
+funding_data <- funding_data %>% mutate(
+  state_territory = ifelse(state_territory == "Deleware","Delaware",state_territory),
+  state_territory = ifelse(state_territory == "District Of Columbia","District of Columbia",state_territory))
+  
+
+
+election_results
+
+state_pop <- state_pop %>%
+  mutate(state_territory = str_remove(state_territory,"."))
+
+
+## Create Merged Table
+m1 <- left_join(funding_data, election_results, by="state_territory")
+m2 <- left_join(m1, state_pop, by="state_territory")
+
+## Remove NA values (US Territories without voting data) from dataset
+m2 <- m2 %>% drop_na()
+
+
+## Remove comma from voter counts and convert to numeric
+m2 <- m2 %>% 
+  mutate_at(c("total_votes","biden_votes", "trump_votes", "other_votes"),~(str_replace_all(., ",", ""))) %>%
+  mutate_at(c("total_votes","biden_votes", "trump_votes", "other_votes"),~as.numeric(.))
+
+```
+
+## Clean Combined Data
+
+Finally, we clean the resuling datasets and create additional summary tables. 
+
+```{r}
+combined_data <- m2 %>% mutate(
+  "biden_won" = ifelse(biden_votes > trump_votes, "yes","no")
+)
+
+combined_data
+
+combined_data <- combined_data %>% 
+  mutate(total_funding = total_funding_billions * 1e9, 
+  per_cap_spending = total_funding/estimate_base_2020,
+  biden_pct = (biden_votes/total_votes))
+
+colnames(combined_data)
+
+combined_simplified <- combined_data %>% select(
+  c("state_territory", "per_cap_spending", "biden_won", "total_funding_billions","biden_pct",
+    "estimate_base_2020","total_funding")
+)
+
+
+
+summary_df <- combined_simplified %>% 
+  group_by(biden_won) %>%
+  summarize(total_funding_billions = sum(total_funding_billions),
+            total_funding = sum(total_funding),
+            total_pop = sum(estimate_base_2020),
+            avg_per_cap = mean(per_cap_spending),
+            med_per_cap = median(per_cap_spending))
+
+summary_df <- summary_df %>%
+  mutate(per_cap = total_funding/total_pop)
+
+```
+
+## Data Visualizations
+
+The following datasets were chosen to help to illustrate the relative differences in funding allocation based on whether or not Biden carried the state in the 2020 US Presidential Election.
+
+
+
+```{r}
+summary_df %>%
+  select(c(1,2,4,7,5)) %>%
+  kbl(
+    col.names = c("Biden Won", "Total Funding", "Population", "Per Capita", "Avg Per Capita"),
+    align = "c",
+    digits = 2,
+    format.args = list(big.mark = ",", scientific=FALSE),
+    caption = "Summary of Spending Levels for Biden Won and Lost Stats"
+  ) %>%
+  kable_material(c("striped"))
+
+
+summary_df %>%
+  ggplot(aes(x=biden_won, y=total_funding, fill=biden_won)) +
+  geom_bar(stat="identity") +
+  labs(title = "Aggregate Funding (in billions)",
+      subtitle = "Data broken down by if Biden won or lost the state in 2020",
+      x = "Biden Won",
+      y = "Total Funding (in billions)",
+      fill = "Biden Won")
+
+
+summary_df %>%
+  ggplot(aes(x=biden_won, y=per_cap, fill=biden_won)) +
+  geom_bar(stat="identity") +
+  labs(title = "Per Capita Spending",
+      subtitle = "Data broken down by if Biden won or lost the state in 2020",
+      x = "Biden Won",
+      y = "Per Capita",
+      fill = "Biden Won")
+
+summary_df %>%
+  ggplot(aes(x=biden_won, y=avg_per_cap, fill=biden_won)) +
+  geom_bar(stat="identity") +
+  labs(title = "Average Per Capita Spending per State ",
+      subtitle = "Data broken down by if Biden won or lost the state in 2020",
+      x = "Biden Won",
+      y = "Average Per Capita Spending",
+      fill = "Biden Won")
+
+
+combined_simplified %>%
+  ggplot(aes(x=reorder(state_territory, per_cap_spending), y=per_cap_spending, fill=biden_won)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Per Capita Spending by State",
+       y="Per Capita Spending",
+       x = "State/Territory")
+
+combined_simplified %>% 
+  ggplot(aes(x=biden_pct, y=total_funding_billions)) +
+  geom_point(aes(size=per_cap_spending, color=biden_won), alpha=.5) +
+  labs(title = "Distribution of Total Spending based on Percent of Total Votes",
+       x = "Percent of Votes",
+       y = "Total Spending (in billions)",
+       color = "Biden Won",
+       size = "Per Capita Spending") +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1))
+
+
+
+
+```
+
+## Conclusion
+In looking at the data, it appears that overall spending levels were higher in states that Biden did not carry in the 2020 election based on both aggregate per-capita spending as well as average per-capita spending per state. Based on the data, we find that the average per-capita spending was X% higher for Non-Biden states compared to Biden states, while the average per-state per-capita spend was X% higher in Non-Biden states compared to Biden states.
+
+
+While my initial thinking was that if there was political bias that it would be in favor of those states that Biden won; it's possible that the political bias may be more strategic and that the administration would be motivated to invest in places where there's a benefit for future elections. Thus the rationale for the apportionment of funds could have actually been based on providing more spending to those states that could potentially be in play in future election cycles in order to curry favor. 
